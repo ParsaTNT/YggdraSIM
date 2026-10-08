@@ -3214,9 +3214,7 @@ class SGP22Orchestrator:
         self.state.load_bpp_response = last_response
         self._progress_advance(progress_bar, "sync notifications")
         if len(last_response) == 0:
-            print("[+] LoadBoundProfilePackage completed with empty response data.")
-            self._sync_pending_notifications()
-            return True
+            raise RuntimeError("LoadBoundProfilePackage ended without a ProfileInstallationResult.")
 
         print(f"[+] LoadBoundProfilePackage Response: {last_response.hex()[:60]}...")
         self._handle_profile_load_result(last_response)

@@ -310,6 +310,10 @@ class Es9LikeClient:
         lowered = candidate.lower()
         if lowered.startswith("http://") or lowered.startswith("https://"):
             return candidate.rstrip("/")
+        # NotificationMetadata supplies an FQDN. Retain an explicitly configured
+        # development HTTPS port when it refers to this same SM-DP+.
+        if candidate.lower() == urllib.parse.urlparse(self._base_url).hostname:
+            return self._base_url
         return f"https://{candidate.rstrip('/')}"
 
     def get_eim_package(self, request_obj: EimPollRequest) -> EimPollResponse:

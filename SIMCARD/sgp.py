@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -72,6 +73,10 @@ class BppIccidMismatchError(ValueError):
     pass
 
 
+class BppProfileInterpretationError(ValueError):
+    pass
+
+
 class SgpLogic:
     NOTIF_INSTALL = 0x01
     NOTIF_ENABLE = 0x02
@@ -79,9 +84,9 @@ class SgpLogic:
     NOTIF_DELETE = 0x04
 
     BPP_COMMAND_IDS = {
-        "bf23": 1,
-        "a0": 2,
-        "a1": 3,
+        "bf23": 0,
+        "a0": 1,
+        "a1": 2,
         "a2": 4,
         "a3": 5,
     }
@@ -1473,7 +1478,7 @@ class SgpLogic:
 
     def _build_profiles_info_response(self) -> bytes:
         entries = b"".join(self._encode_profile_entry(profile) for profile in self.state.profiles)
-        return tlv("BF2D", tlv("A0", tlv("30", entries)))
+        return tlv("BF2D", tlv("A0", entries))
 
     def _encode_profile_entry(self, profile: SimProfileEntry) -> bytes:
         state_byte = b"\x01" if str(profile.state).strip().lower() == "enabled" else b"\x00"
@@ -1500,10 +1505,7 @@ class SgpLogic:
         return tlv("E3", body)
 
     def _issue_card_challenge(self) -> bytes:
-        challenge = hashlib.sha256(
-            bytes.fromhex(self.state.eid)
-            + self.state.apdu_count.to_bytes(4, "big", signed=False)
-        ).digest()[:16]
+        challenge = os.urandom(16)
         self.state.sgp_session.card_challenge = challenge
         return challenge
 
@@ -2062,10 +2064,10 @@ class SgpLogic:
 
         card_challenge = bytes(self.state.sgp_session.card_challenge)
         if len(card_challenge) == 0 or parsed["euicc_challenge"] != card_challenge:
-            return self._authenticate_error(0x01), 0x90, 0x00
+            return self._authenticate_error(0x01, parsed["transaction_id"]), 0x90, 0x00
         validation_error = self._validate_authenticate_server_request(parsed)
         if validation_error is not None:
-            return self._authenticate_error(validation_error), 0x90, 0x00
+            return self._authenticate_error(validation_error, parsed["transaction_id"]), 0x90, 0x00
 
         self.state.sgp_session = SimSgpSession(
             card_challenge=card_challenge,
@@ -2145,7 +2147,7 @@ class SgpLogic:
         if bf23_info is None:
             return self._install_failure("bf23", 7), 0x90, 0x00
         if bf23_info["transaction_id"] != session.transaction_id:
-            return self._install_failure("bf23", 13), 0x90, 0x00
+            return self._install_failure("bf23", 3), 0x90, 0x00
         if bf23_info["remote_op_id"] != 1:
             return self._install_failure("bf23", 7), 0x90, 0x00
         key_type = bytes(bf23_info["control_ref_template"].get("keyType", b""))
@@ -2160,7 +2162,7 @@ class SgpLogic:
         if len(smdp_otpk) == 0 or len(smdp_sign) != 64:
             return self._install_failure("bf23", 7), 0x90, 0x00
         if self._verify_bf23_signature(bf23_info, session) is False:
-            return self._install_failure("bf23", 8), 0x90, 0x00
+            return self._install_failure("bf23", 2), 0x90, 0x00
 
         try:
             smdp_public_key = ec.EllipticCurvePublicKey.from_encoded_point(
@@ -2179,6 +2181,11 @@ class SgpLogic:
             return self._install_failure("bf23", 8), 0x90, 0x00
 
         session.pending_bpp_segments = [bytes(payload)]
+        root_tag, root_length, root_header, _ = read_tlv_header(payload, 0)
+        # Legacy component fixtures use a complete BF36 containing only BF23;
+        # Annex M's streamed BF36 advertises the complete, larger package.
+        session.bpp_expected_bytes = (root_header + root_length
+            if root_tag == bytes.fromhex("BF36") and root_header + root_length > len(payload) else 0)
         session.bpp_section = ""
         session.bpp_section_remaining = -1
         session.bpp_configure_isdp_request = b""
@@ -2289,6 +2296,9 @@ class SgpLogic:
                 session.bpp_unprotected_profile += plaintext
                 self._consume_bpp_section_bytes(members)
                 if self._is_final_a3_chunk(plaintext):
+                    if (session.bpp_expected_bytes and
+                            sum(map(len, session.pending_bpp_segments)) != session.bpp_expected_bytes):
+                        raise ValueError("Bound profile package length does not match its header.")
                     profile = self._create_installed_profile_from_bpp()
                     notification = self._enqueue_notification(operation=self.NOTIF_INSTALL, profile=profile)
                     return self._profile_installation_result(
@@ -2302,6 +2312,8 @@ class SgpLogic:
                         notification_address=notification.address,
                     ), 0x90, 0x00
                 return b"", 0x90, 0x00
+        except BppProfileInterpretationError:
+            return self._install_failure(section, 12), 0x90, 0x00
         except BppDuplicateIccidError:
             return self._install_failure(section, 9), 0x90, 0x00
         except BppIccidMismatchError:
@@ -2320,7 +2332,7 @@ class SgpLogic:
             return
         session.bpp_section_remaining -= sum(len(member) for member in members)
         if session.bpp_section_remaining < 0:
-            session.bpp_section_remaining = 0
+            raise ValueError("Protected members exceed the declared section length.")
 
     def _is_final_a3_chunk(self, plaintext: bytes) -> bool:
         session = self.state.sgp_session
@@ -3183,6 +3195,14 @@ class SgpLogic:
             iccid=profile.iccid,
             notification_address=notification_address,
         )
+        if operation != self.NOTIF_INSTALL:
+            metadata = self._notification_metadata_tlv(
+                seq_number=seq_number, operation=operation, iccid=profile.iccid,
+                notification_address=notification_address,
+            )
+            payload = tlv("30", metadata + tlv("5F37", self._raw_ecdsa_signature(
+                self._euicc_private_key, metadata)) + self._current_euicc_certificate_der()
+                + self._current_eum_certificate_der())
         self.state.notifications.append(
             SimNotificationEntry(
                 seq_number=seq_number,
@@ -3208,29 +3228,28 @@ class SgpLogic:
         notification_address: str = "",
     ) -> bytes:
         session = self.state.sgp_session
-        metadata = b""
-        if seq_number is not None:
-            metadata = self._notification_metadata_tlv(
+        if seq_number is None:
+            seq_number = self.state.next_notification_seq
+            self.state.next_notification_seq += 1
+        metadata = self._notification_metadata_tlv(
                 seq_number=seq_number,
-                operation=operation,
+                operation=operation or self.NOTIF_INSTALL,
                 iccid=iccid,
                 notification_address=notification_address,
             )
-        final_tag = "A0" if success else "A1"
-        final_result = tlv(
-            final_tag,
-            tlv("80", bytes([result_code & 0xFF]))
-            + tlv("81", bytes([result_detail & 0xFF]))
-            + (tlv("4F", aid) if len(aid) > 0 else b""),
-        )
+        if success:
+            final_result = tlv("A0", tlv("4F", aid) + tlv("04", b""))
+        else:
+            final_result = tlv("A1", tlv("80", encode_der_integer(result_code))
+                               + tlv("81", encode_der_integer(result_detail)))
         inner = (
             tlv("80", bytes(session.transaction_id))
             + metadata
             + tlv("06", bytes.fromhex("88370A"))
             + tlv("A2", final_result)
-            + tlv("5F37", self._signature_blob(b"PIR", bytes(session.transaction_id), aid))
         )
-        return tlv("BF37", tlv("BF27", inner))
+        signed = tlv("BF27", inner)
+        return tlv("BF37", signed + tlv("5F37", self._raw_ecdsa_signature(self._euicc_private_key, signed)))
 
     @staticmethod
     def _encode_notification_seq(seq_number: int) -> bytes:
@@ -3240,15 +3259,22 @@ class SgpLogic:
             return seq_number.to_bytes(2, "big")
         return seq_number.to_bytes(4, "big")
 
-    def _authenticate_error(self, error_code: int) -> bytes:
-        return tlv("BF38", tlv("A1", tlv("80", bytes([error_code & 0xFF]))))
+    def _authenticate_error(self, error_code: int, transaction_id: bytes = b"") -> bytes:
+        # Convert the legacy internal codes to SGP.22 AuthenticateErrorCode.
+        wire_code = {1: 6, 2: 1, 3: 2, 7: 127, 8: 7}.get(error_code, 127)
+        return tlv("BF38", tlv("A1", tlv("80", bytes(transaction_id))
+                               + tlv("02", encode_der_integer(wire_code))))
 
     def _prepare_download_error(self, error_code: int) -> bytes:
-        return tlv("BF21", tlv("A1", tlv("80", bytes([error_code & 0xFF]))))
+        wire_code = 127 if error_code == 7 else error_code
+        return tlv("BF21", tlv("A1", tlv("80", self.state.sgp_session.transaction_id)
+                               + tlv("02", encode_der_integer(wire_code))))
 
     def _install_failure(self, command: str, detail: int) -> bytes:
         result_code = self.BPP_COMMAND_IDS.get(str(command), self.state.sgp_session.install_command_id or 1)
-        return self._profile_installation_result(success=False, result_code=result_code, result_detail=detail)
+        response = self._profile_installation_result(success=False, result_code=result_code, result_detail=detail)
+        self.state.sgp_session = SimSgpSession()
+        return response
 
     @staticmethod
     def _cancel_session_response_error(reason_code: int) -> bytes:
@@ -3322,11 +3348,13 @@ class SgpLogic:
             return 0x02
         if self._certificate_is_revoked(certificate):
             return 0x02
+        if not self._consumer_certificate_trusted(certificate):
+            return 0x02
 
         root_ci_id = bytes(parsed.get("root_ci_id", b""))
         configured_ci_pkids = self._configured_ci_pkids()
         if len(root_ci_id) > 0 and root_ci_id not in configured_ci_pkids:
-            return 0x02
+            return 0x08
         authority_key_id = self._certificate_authority_key_identifier(certificate)
         if len(root_ci_id) > 0 and len(authority_key_id) > 0 and authority_key_id != root_ci_id:
             return 0x02
@@ -3442,6 +3470,8 @@ class SgpLogic:
             return 0x01
         if self._certificate_is_revoked(certificate):
             return 0x01
+        if not self._consumer_certificate_trusted(certificate):
+            return 0x01
         if self._prepare_download_certificate_continuation_valid(certificate_der, certificate, session) is False:
             return 0x01
         public_key = certificate.public_key()
@@ -3501,6 +3531,33 @@ class SgpLogic:
         if len(current_identity) == 0 or current_identity != previous_identity:
             return False
         return True
+
+    def _consumer_certificate_trusted(self, certificate: crypto_x509.Certificate) -> bool:
+        """Verify DP certificates against an explicitly provisioned simulator CI.
+
+        The optional path fails closed when configured but unreadable. Older
+        component fixtures without provisioned CI material retain their legacy
+        identifier-only behavior; this is not a secure trust configuration.
+        """
+        configured = os.environ.get("YGGDRASIM_SIM_CI_CERT_PATH", "").strip()
+        root_der = self._ci_certificate_der
+        if configured:
+            root_der = self._load_builtin_pem_certificate_der(Path(configured))
+            if not root_der:
+                return False
+        if not root_der:
+            return True
+        try:
+            root = crypto_x509.load_der_x509_certificate(root_der)
+            if self._certificate_subject_key_identifier(root) not in self._configured_ci_pkids():
+                return False
+            if certificate.issuer != root.subject:
+                return False
+            root.public_key().verify(certificate.signature, certificate.tbs_certificate_bytes,
+                                     ec.ECDSA(certificate.signature_hash_algorithm))
+            return True
+        except Exception:
+            return False
 
     def _build_euicc_signed1(
         self,
@@ -3653,16 +3710,22 @@ class SgpLogic:
             str(metadata.get("notification_address", "")).strip() or self._default_notification_address()
         )
         requested_iccid = str(metadata.get("iccid", "")).strip()
-        profile_image = decode_profile_image(
-            session.bpp_unprotected_profile,
-            default_iccid=requested_iccid,
-            default_name=profile_name,
-        )
+        try:
+            profile_image = decode_profile_image(
+                session.bpp_unprotected_profile,
+                default_iccid=requested_iccid,
+                default_name=profile_name,
+                strict=True,
+            )
+        except ValueError as error:
+            raise BppProfileInterpretationError(str(error)) from error
         decoded_iccid = ""
         if profile_image is not None:
             decoded_iccid = str(profile_image.iccid or "").strip()
         if len(requested_iccid) > 0 and len(decoded_iccid) > 0 and requested_iccid != decoded_iccid:
             raise BppIccidMismatchError("StoreMetadata ICCID did not match decoded profile ICCID.")
+        if profile_image is None or not profile_image.nodes:
+            raise ValueError("Profile interpreter produced no filesystem image.")
         effective_iccid = requested_iccid or decoded_iccid or self._next_generated_iccid()
         if any(profile.iccid == effective_iccid for profile in self.state.profiles):
             raise BppDuplicateIccidError("Profile ICCID already exists on simulated eUICC.")
@@ -3854,10 +3917,6 @@ class SgpLogic:
         signature_der = private_key.sign(bytes(payload), ec.ECDSA(hashes.SHA256()))
         r_value, s_value = asym_utils.decode_dss_signature(signature_der)
         return r_value.to_bytes(32, "big") + s_value.to_bytes(32, "big")
-
-    def _signature_blob(self, *parts: bytes) -> bytes:
-        digest = hashlib.sha256(b"".join(bytes(part or b"") for part in parts)).digest()
-        return digest + digest
 
     def _build_self_signed_certificate(
         self,

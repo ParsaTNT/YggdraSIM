@@ -453,6 +453,7 @@ class SimScp03Session:
 
 @dataclass
 class SimSgpSession:
+    bpp_expected_bytes: int = 0
     card_challenge: bytes = b""
     transaction_id: bytes = b""
     server_address: str = ""

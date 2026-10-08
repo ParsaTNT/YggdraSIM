@@ -1021,10 +1021,13 @@ def decode_profile_image(
     default_name: str = "",
     default_imsi: str = "",
     default_impi: str = "",
+    strict: bool = False,
 ) -> SimProfileImage | None:
     """Decode a SAIP profile image byte blob into a structured Python dict."""
     raw = bytes(upp_bytes or b"")
     if len(raw) == 0:
+        if strict:
+            raise ValueError("Empty interoperable profile package.")
         return None
     image = SimProfileImage(
         profile_name=str(default_name or "").strip(),
@@ -1041,22 +1044,34 @@ def decode_profile_image(
 
     asn1 = _get_saip_asn1()
     if asn1 is None:
+        if strict:
+            raise ValueError("SAIP ASN.1 interpreter is unavailable.")
         return _finalize_image(image)
 
     offset = 0
+    element_types = []
     while offset < len(raw):
         try:
             _, _, raw_tlv, next_offset = read_tlv(raw, offset)
-        except Exception:
+        except Exception as error:
+            if strict:
+                raise ValueError("Malformed or truncated profile element.") from error
             break
         try:
             pe_type, decoded = asn1.decode("ProfileElement", raw_tlv)
-        except Exception:
+        except Exception as error:
+            if strict:
+                raise ValueError("Profile element could not be interpreted.") from error
             offset = next_offset
             continue
+        element_types.append(pe_type)
         if isinstance(decoded, dict):
             _consume_profile_element(image, str(pe_type or "").strip(), decoded)
         offset = next_offset
+    if strict and (not element_types or element_types[0] != "header"
+                   or element_types[-1] != "end" or element_types.count("header") != 1
+                   or element_types.count("end") != 1):
+        raise ValueError("Profile package must start with a header and finish with one end element.")
     return _finalize_image(image)
 
 

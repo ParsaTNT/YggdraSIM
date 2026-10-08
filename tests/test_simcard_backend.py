@@ -613,6 +613,8 @@ def parse_profile_install_result(raw_response: bytes) -> tuple[int | None, int |
     if len(final_raw) == 0:
         return None, None
     _, final_value, _, _ = read_tlv(final_raw, 0)
+    if final_raw.startswith(b"\xA0") and final_value.startswith(b"\x4F"):
+        return 5, 0  # Standard SuccessResult has AID and SIMA response, no error codes.
     result_code = None
     result_detail = None
     offset = 0
@@ -796,7 +798,7 @@ class SimulatedConnectionTests(unittest.TestCase):
 
             auth_response, sw1, sw2 = send_store_data_payload(connection, auth_payload)
             self.assertEqual((sw1, sw2), (0x90, 0x00))
-            self.assertEqual(auth_response, bytes.fromhex("BF3805A103800103"))
+            self.assertEqual(auth_response, bytes.fromhex("BF3817A11580100102030405060708090A0B0C0D0E0F10020102"))
 
     def test_simulated_connection_rejects_prepare_download_with_invalid_signature(self) -> None:
         with mock.patch.dict(os.environ, {CARD_BACKEND_ENV: "sim"}, clear=False):
@@ -832,7 +834,8 @@ class SimulatedConnectionTests(unittest.TestCase):
             )
             prepare_response, sw1, sw2 = send_store_data_payload(connection, prepare_payload)
             self.assertEqual((sw1, sw2), (0x90, 0x00))
-            self.assertEqual(prepare_response, bytes.fromhex("BF2105A103800102"))
+            self.assertEqual(prepare_response, wrap_tlv("BF21", wrap_tlv("A1",
+                wrap_tlv("80", transaction_id) + wrap_tlv("02", b"\x02"))))
 
     def test_simulated_connection_rejects_prepare_download_with_certificate_mismatch(self) -> None:
         with mock.patch.dict(os.environ, {CARD_BACKEND_ENV: "sim"}, clear=False):
@@ -868,7 +871,8 @@ class SimulatedConnectionTests(unittest.TestCase):
             )
             prepare_response, sw1, sw2 = send_store_data_payload(connection, prepare_payload)
             self.assertEqual((sw1, sw2), (0x90, 0x00))
-            self.assertEqual(prepare_response, bytes.fromhex("BF2105A103800101"))
+            self.assertEqual(prepare_response, wrap_tlv("BF21", wrap_tlv("A1",
+                wrap_tlv("80", transaction_id) + wrap_tlv("02", b"\x01"))))
 
     def test_simulated_connection_accepts_local_smdpp_auth_and_pb_certificate_pair(self) -> None:
         with mock.patch.dict(os.environ, {CARD_BACKEND_ENV: "sim"}, clear=False):
@@ -1837,7 +1841,7 @@ metadata_overrides = {{
             self.assertEqual((sw1, sw2), (0x90, 0x00))
             self.assertTrue(retrieve_response.startswith(bytes.fromhex("BF2B")))
 
-            pending_notification = find_first_tlv(retrieve_response, "BF37")
+            pending_notification = find_first_tlv(retrieve_response, "30")
             self.assertGreater(len(pending_notification), 0)
             pending_metadata = find_first_tlv(pending_notification, "BF2F")
             self.assertGreater(len(pending_metadata), 0)
@@ -2057,7 +2061,9 @@ metadata_overrides = {{
                 self.assertEqual((sw1, sw2), (0x90, 0x00))
 
                 euicc_otpk_raw = find_first_tlv(prepare_response, "5F49")
-                oversized_upp = wrap_tlv("A0", wrap_tlv("80", b"\x01")) + (b"\xAA" * 1500)
+                oversized_upp = build_minimal_saip_upp(
+                    iccid="89881111111111111222", imsi="123456781234567",
+                    impi="x" * 1500 + "@example.test", profile_name="Segmented A3 Profile")
                 bpp_segments = build_signed_bpp_segments(
                     transaction_id=transaction_id,
                     euicc_otpk_raw=euicc_otpk_raw,
@@ -2254,7 +2260,6 @@ metadata_overrides = {{
                     iccid="89881111111111111167",
                     provider_name="Notification Provider",
                     profile_name="Notification Profile",
-                    upp_payload=b"\x01",
                 )
                 _, sw1, sw2 = send_store_data_payload(connection, bpp_segments["bootstrap"])
                 self.assertEqual((sw1, sw2), (0x90, 0x00))
@@ -2601,7 +2606,6 @@ metadata_overrides = {{
                 iccid="89881111111111111112",
                 provider_name="Duplicate Provider",
                 profile_name="Duplicate ICCID",
-                upp_payload=b"\x01",
             )
             _, sw1, sw2 = send_store_data_payload(connection, bpp_segments["bootstrap"])
             self.assertEqual((sw1, sw2), (0x90, 0x00))
