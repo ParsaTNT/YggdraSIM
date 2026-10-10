@@ -24,7 +24,7 @@ from tests.test_simcard_backend import (
 )
 
 LAB = Path(os.environ.get('ESIMULACRUM_ROOT', Path(__file__).resolve().parents[2]))
-CERT = LAB / 'fixtures/certs'
+CERT = LAB / 'build/state/certs'
 
 @pytest.fixture
 def card(tmp_path, monkeypatch, request):
