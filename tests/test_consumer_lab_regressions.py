@@ -35,7 +35,7 @@ def card(tmp_path, monkeypatch, request):
     monkeypatch.setenv('YGGDRASIM_SIM_CI_CERT_PATH', str(CERT / 'CertificateIssuer/CERT_CI_ECDSA_NIST.pem'))
     monkeypatch.setenv('YGGDRASIM_SIM_QUIRKS', 'NONE')
     monkeypatch.setenv('YGGDRASIM_SIM_BEHAVIOUR_PROFILE', 'NONE')
-    engine = SimulatedSimCardEngine(isdr_config_path=str(LAB / 'fixtures/isdr.json'),
+    engine = SimulatedSimCardEngine(isdr_config_path=str(LAB / 'build/state/isdr.json'),
         euicc_store_root=str(tmp_path / 'euicc'), profile_store_path=str(tmp_path / 'profiles'))
     apdus = []
     class Connection:
@@ -57,7 +57,7 @@ def card(tmp_path, monkeypatch, request):
            'before': [p.iccid for p in engine.state.profiles]}
     yield obj
     assert [p.iccid for p in engine.state.profiles] == obj['before']
-    reloaded = SimulatedSimCardEngine(isdr_config_path=str(LAB / 'fixtures/isdr.json'),
+    reloaded = SimulatedSimCardEngine(isdr_config_path=str(LAB / 'build/state/isdr.json'),
         euicc_store_root=str(tmp_path / 'euicc'), profile_store_path=str(tmp_path / 'profiles'))
     assert [p.iccid for p in reloaded.state.profiles] == obj['before']
     log = LAB / 'build/logs/regression-apdus'
