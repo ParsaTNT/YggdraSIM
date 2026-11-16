@@ -25,6 +25,7 @@ from SIMCARD.identity import IdentityLogic
 from SIMCARD.isdr_config import load_isdr_config_into_state
 from SIMCARD.naa import NaaLogic
 from SIMCARD.profile_store import (
+    PROFILE_STATES_FILENAME,
     load_profiles_from_store,
     profile_store_has_entries,
     sync_profiles_to_store,
@@ -209,20 +210,19 @@ class SimulatedSimCardEngine:
         store_path = str(self.state.profile_store_path or "").strip()
         if len(store_path) == 0:
             return
-        try:
-            if profile_store_has_entries(store_path):
-                loaded_profiles = load_profiles_from_store(store_path)
-                if len(loaded_profiles) > 0:
-                    self.state.profiles = loaded_profiles
-                    self.state.active_profile_aid = ""
-                    for profile in loaded_profiles:
-                        if str(profile.state).strip().lower() == "enabled":
-                            self.state.active_profile_aid = profile.aid
-                            break
-                return
-            sync_profiles_to_store(store_path, self.state.profiles)
-        except Exception:
+        if profile_store_has_entries(store_path):
+            loaded_profiles = load_profiles_from_store(store_path)
+            if len(loaded_profiles) > 0 or os.path.lexists(
+                os.path.join(store_path, PROFILE_STATES_FILENAME)
+            ):
+                self.state.profiles = loaded_profiles
+                self.state.active_profile_aid = ""
+                for profile in loaded_profiles:
+                    if str(profile.state).strip().lower() == "enabled":
+                        self.state.active_profile_aid = profile.aid
+                        break
             return
+        sync_profiles_to_store(store_path, self.state.profiles)
 
     def _sync_all_stores(self) -> None:
         if self._seed_euicc_store_after_init:
@@ -239,6 +239,7 @@ class SimulatedSimCardEngine:
             sync_profiles_to_store(profile_store_path, self.state.profiles)
         except Exception as sync_error:
             _notify_sync_failure("profiles", profile_store_path, sync_error)
+            raise
         self._dispatch_profile_download_hooks()
 
     # --- Profile-download hook layer -----------------------------------
