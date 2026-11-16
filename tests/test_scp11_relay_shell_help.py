@@ -852,7 +852,7 @@ class RelayShellHelpTests(unittest.TestCase):
             console.orchestrator._es10b_logical_channel = 1
 
             def collect_snapshot():
-                console._send_store_data_with_logical_fallback(bytes.fromhex("BF3E00"), "GET: EID")
+                console._send_store_data_with_logical_fallback(bytes.fromhex("BF3E035C015A"), "GET: EID")
                 return module.CardSnapshot(
                     eid="89044045930000000000001492294428",
                     issuer_number="89044045",
@@ -876,7 +876,7 @@ class RelayShellHelpTests(unittest.TestCase):
             self.assertIn("INIT-BANNER: SELECT ISD-R CH0", send_logs)
             self.assertIn("INIT-BANNER: STATUS CH0", send_logs)
             get_call = next(entry for entry in send_calls if entry[0] == "GET: EID")
-            self.assertEqual(get_call[1], bytes.fromhex("80E2910003BF3E00"))
+            self.assertEqual(get_call[1], bytes.fromhex("80E2910006BF3E035C015A"))
             self.assertEqual(console.orchestrator._es10b_logical_channel, 0)
             self.assertTrue(console._session_dirty)
 
@@ -919,14 +919,14 @@ class RelayShellHelpTests(unittest.TestCase):
             console.orchestrator = orchestrator
 
             response = console._send_store_data_with_logical_fallback(
-                bytes.fromhex("BF3E00"),
+                bytes.fromhex("BF3E035C015A"),
                 "GET: EID",
             )
 
             self.assertEqual(response, b"\xBF\x3E\x00")
             self.assertEqual(
                 orchestrator.store_data_calls,
-                [(bytes.fromhex("BF3E00"), "GET: EID", True)],
+                [(bytes.fromhex("BF3E035C015A"), "GET: EID", True)],
             )
             self.assertEqual(console.apdu_channel.send_calls, [])
 

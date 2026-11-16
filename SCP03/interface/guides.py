@@ -242,7 +242,7 @@ class ShellGuides :
 {Config.Colors.CYAN}3. eUICC Information (ES10b/ES10c){Config.Colors.ENDC}
    - {Config.Colors.BOLD}EuiccInfo1 (BF 20):{Config.Colors.ENDC} `80 E2 91 00 03 BF 20 00`. Returns eUICC firmware version (e.g. SVN).
    - {Config.Colors.BOLD}EuiccInfo2 (BF 22):{Config.Colors.ENDC} `80 E2 91 00 03 BF 22 00`. Returns capabilities (ExtExtCardResource, supported crypto, default SM-DP+ address list).
-   - {Config.Colors.BOLD}EID:{Config.Colors.ENDC} In practice the tool first tries direct `BF3E00` retrieval and only falls back to tagged forms when needed, because many cards expose EID more reliably through ES10 retrieval than classic GET DATA.
+   - {Config.Colors.BOLD}EID:{Config.Colors.ENDC} ES10c.GetEID uses the required tag list `BF3E035C015A` (`tagList` = `5A`).
 
 {Config.Colors.CYAN}4. SGP.32 IoT retrieval (ES10b, no auth){Config.Colors.ENDC}
    - {Config.Colors.BOLD}GetRAT (BF 43):{Config.Colors.ENDC} Rules Authorisation Table. Use MANAGE-PROFILE action 6.

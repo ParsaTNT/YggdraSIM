@@ -1678,13 +1678,10 @@ class Sgp22Manager :
         return last_data ,last_sw1 ,last_sw2
 
     def _retrieve_eid_response (self )->Tuple [bytes ,int ,int ]:
-        data ,sw1 ,sw2 =self ._send_store_data_with_retry_ladder ("BF3E00")
+        data ,sw1 ,sw2 =self ._send_store_data_with_retry_ladder ("BF3E035C015A")
         if sw1 ==0x90 and data :
             return data ,sw1 ,sw2
-        tagged_data ,tagged_sw1 ,tagged_sw2 =self ._send_store_data_with_retry_ladder ("BF3E035C015A")
-        if tagged_sw1 ==0x90 and tagged_data :
-            return tagged_data ,tagged_sw1 ,tagged_sw2
-        return tagged_data ,tagged_sw1 ,tagged_sw2
+        return data ,sw1 ,sw2
 
     def _extract_eid_hex (self ,data :bytes )->str :
         if not data :

@@ -21,7 +21,7 @@ from cryptography.x509.oid import ExtensionOID, NameOID
 from SIMCARD.bsp import BspCryptoError, BspInstance
 from SIMCARD.euicc_store import sync_euicc_store
 from SIMCARD.etsi_fs import next_generated_profile_aid, rebuild_runtime_filesystem
-from SIMCARD.profile_store import sync_profiles_to_store
+from SIMCARD.profile_store import ensure_profile_state_snapshot, sync_profiles_to_store
 from SIMCARD.saip_profile import decode_profile_image
 from SIMCARD.sgp32_packages import (
     EuiccPackageDecodeError,
@@ -148,8 +148,10 @@ class SgpLogic:
             return self._build_eim_configuration_response(normalized), 0x90, 0x00
         if normalized == bytes.fromhex("BF5600"):
             return self._build_certs_response(), 0x90, 0x00
-        if normalized in (bytes.fromhex("BF3E00"), bytes.fromhex("BF3E035C015A")):
+        if normalized == bytes.fromhex("BF3E035C015A"):
             return tlv("BF3E", tlv("5A", bytes.fromhex(self.state.eid))), 0x90, 0x00
+        if normalized.startswith(bytes.fromhex("BF3E")):
+            return b"", 0x6A, 0x80
         if normalized.startswith(bytes.fromhex("BF31")):
             return self._handle_profile_state_change(normalized, "enabled", self.NOTIF_ENABLE, "BF31")
         if normalized.startswith(bytes.fromhex("BF32")):
@@ -243,6 +245,17 @@ class SgpLogic:
         profile = self._resolve_profile_reference(payload)
         if profile is None:
             return tlv(response_tag, tlv("80", b"\x01")), 0x90, 0x00
+        try:
+            ensure_profile_state_snapshot(
+                str(self.state.profile_store_path or ""),
+                self.state.profiles,
+            )
+        except Exception:
+            return tlv(response_tag, tlv("80", b"\x7f")), 0x90, 0x00
+        previous_states = [(entry, str(entry.state)) for entry in self.state.profiles]
+        previous_active_aid = str(self.state.active_profile_aid)
+        previous_notifications = list(self.state.notifications)
+        previous_notification_sequence = self.state.next_notification_seq
         if new_state == "enabled":
             for current in self.state.profiles:
                 if current is profile:
@@ -254,9 +267,24 @@ class SgpLogic:
             profile.state = new_state
             if self.state.active_profile_aid.upper() == profile.aid.upper():
                 self.state.active_profile_aid = ""
-        rebuild_runtime_filesystem(self.state)
-        self._sync_profile_store()
-        self._enqueue_notification(operation=operation, profile=profile)
+        try:
+            rebuild_runtime_filesystem(self.state)
+            self._enqueue_notification(operation=operation, profile=profile)
+            persisted = self._sync_profile_store()
+        except Exception:
+            persisted = False
+        if persisted is False:
+            for entry, state in previous_states:
+                entry.state = state
+            self.state.active_profile_aid = previous_active_aid
+            self.state.notifications[:] = previous_notifications
+            self.state.next_notification_seq = previous_notification_sequence
+            rebuild_runtime_filesystem(self.state)
+            # The profile-state commit record still describes the old
+            # state. Best-effort rewrite the individual manifests to match;
+            # a failure here cannot expose the uncommitted switch on reload.
+            self._sync_profile_store()
+            return tlv(response_tag, tlv("80", b"\x7f")), 0x90, 0x00
         return tlv(response_tag, tlv("80", b"\x00")), 0x90, 0x00
 
     def _handle_profile_delete(self, payload: bytes) -> tuple[bytes, int, int]:
@@ -2025,14 +2053,15 @@ class SgpLogic:
         certificate = builder.sign(self._eum_private_key, hashes.SHA256())
         return certificate.public_bytes(serialization.Encoding.DER)
 
-    def _sync_profile_store(self) -> None:
+    def _sync_profile_store(self) -> bool:
         store_path = str(self.state.profile_store_path or "").strip()
         if len(store_path) == 0:
-            return
+            return True
         try:
             sync_profiles_to_store(store_path, self.state.profiles)
         except Exception:
-            return
+            return False
+        return True
 
     def _current_eum_certificate_der(self) -> bytes:
         raw = bytes(self.state.eum_certificate_der or b"")

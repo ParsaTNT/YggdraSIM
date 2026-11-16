@@ -2552,8 +2552,7 @@ class SCP11Console:
     def _get_eid(self) -> str:
         errors: List[str] = []
         payload_attempts = [
-            (bytes.fromhex("BF3E00"), "GET: EID"),
-            (_build_tlv(bytes.fromhex("BF3E"), _build_tlv(bytes.fromhex("5C"), bytes.fromhex("5A"))), "GET: EID [TAGGED]"),
+            (bytes.fromhex("BF3E035C015A"), "GET: EID"),
         ]
         for payload, log_name in payload_attempts:
             try:

@@ -717,6 +717,46 @@ class SimulatedConnectionTests(unittest.TestCase):
         self._assert_refresh_queued(engine)
 
     def test_downloaded_disabled_profile_rebuilds_runtime_isdp_registry(self) -> None:
+        from SIMCARD.state import SimProfileFsNode, SimProfileImage
+
+        engine = SimulatedSimCardEngine()
+        engine.state.sgp_session.bpp_store_metadata = {
+            "iccid": "89881111111111111177",
+            "profile_name": "Runtime Registry Profile",
+            "profile_class": "operational",
+            "service_provider": "Test Provider",
+        }
+        engine.state.sgp_session.bpp_unprotected_profile = b"mocked UPP input"
+        decoded_image = SimProfileImage(
+            profile_name="Runtime Registry Profile",
+            iccid="89881111111111111177",
+            nodes=[
+                SimProfileFsNode(
+                    path=("MF",),
+                    name="MF",
+                    kind="mf",
+                    fid="3F00",
+                )
+            ],
+        )
+
+        with mock.patch("SIMCARD.sgp.decode_profile_image", return_value=decoded_image) as decoder:
+            profile = engine.sgp._create_installed_profile_from_bpp()
+
+        decoder.assert_called_once_with(
+            b"mocked UPP input",
+            default_iccid="89881111111111111177",
+            default_name="Runtime Registry Profile",
+            strict=True,
+        )
+
+        self.assertEqual(profile.state, "disabled")
+        self.assertIn(f"ISDP::{profile.aid.upper()}", engine.state.nodes)
+        self.assertEqual(engine.state.nodes[f"ISDP::{profile.aid.upper()}"].aid, profile.aid)
+
+    def test_malformed_unprotected_profile_is_rejected_without_state_mutation(self) -> None:
+        from SIMCARD.sgp import BppProfileInterpretationError
+
         engine = SimulatedSimCardEngine()
         engine.state.sgp_session.bpp_store_metadata = {
             "iccid": "89881111111111111177",
@@ -725,12 +765,14 @@ class SimulatedConnectionTests(unittest.TestCase):
             "service_provider": "Test Provider",
         }
         engine.state.sgp_session.bpp_unprotected_profile = b"\x00"
+        profiles_before = list(engine.state.profiles)
+        node_ids_before = set(engine.state.nodes)
 
-        profile = engine.sgp._create_installed_profile_from_bpp()
+        with self.assertRaises(BppProfileInterpretationError):
+            engine.sgp._create_installed_profile_from_bpp()
 
-        self.assertEqual(profile.state, "disabled")
-        self.assertIn(f"ISDP::{profile.aid.upper()}", engine.state.nodes)
-        self.assertEqual(engine.state.nodes[f"ISDP::{profile.aid.upper()}"].aid, profile.aid)
+        self.assertEqual(engine.state.profiles, profiles_before)
+        self.assertEqual(set(engine.state.nodes), node_ids_before)
 
     def test_simulated_connection_supports_basic_fs_and_sgp_reads(self) -> None:
         with mock.patch.dict(os.environ, {CARD_BACKEND_ENV: "sim"}, clear=False):
@@ -912,6 +954,21 @@ class SimulatedConnectionTests(unittest.TestCase):
             self.assertTrue(prepare_response.startswith(bytes.fromhex("BF21")))
             self.assertGreater(len(find_first_tlv(prepare_response, "5F49")), 0)
 
+    def test_get_eid_rejects_empty_and_unsupported_tag_lists(self) -> None:
+        with mock.patch.dict(os.environ, {CARD_BACKEND_ENV: "sim"}, clear=False):
+            connection = create_card_connection(reader_index=0)
+            _data, sw1, sw2 = connection.transmit(
+                list(bytes.fromhex(f"00A4040010{ISDR_AID}"))
+            )
+            self.assertEqual((sw1, sw2), (0x90, 0x00))
+
+            for payload in ("BF3E00", "BF3E035C0100"):
+                with self.subTest(payload=payload):
+                    apdu = f"80E29100{len(bytes.fromhex(payload)):02X}{payload}"
+                    response, sw1, sw2 = connection.transmit(list(bytes.fromhex(apdu)))
+                    self.assertEqual((sw1, sw2), (0x6A, 0x80))
+                    self.assertEqual(bytes(response), b"")
+
     def test_simulated_connection_emits_verifiable_card_cert_chain_and_signatures(self) -> None:
         with mock.patch.dict(os.environ, {CARD_BACKEND_ENV: "sim"}, clear=False):
             connection = create_card_connection(reader_index=0)
@@ -922,7 +979,9 @@ class SimulatedConnectionTests(unittest.TestCase):
             challenge, sw1, sw2 = connection.transmit(list(bytes.fromhex("80E2910003BF2E00")))
             self.assertEqual((sw1, sw2), (0x90, 0x00))
 
-            eid_response, sw1, sw2 = connection.transmit(list(bytes.fromhex("80E2910003BF3E00")))
+            eid_response, sw1, sw2 = connection.transmit(
+                list(bytes.fromhex("80E2910006BF3E035C015A"))
+            )
             self.assertEqual((sw1, sw2), (0x90, 0x00))
             eid_text = extract_nested_tlv_value(bytes(eid_response), "BF3E", "5A").hex().upper()
 

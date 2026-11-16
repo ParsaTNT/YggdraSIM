@@ -37,6 +37,12 @@ STORE_VERSION = 1
 MANIFEST_FILENAME = "manifest.json"
 PROFILE_IMAGE_FILENAME = "profile_image.json"
 PROFILE_UPP_FILENAME = "profile.upp.der"
+PROFILE_STATES_FILENAME = "profile-states.json"
+PROFILE_STATES_MARKER_FILENAME = "profile-states-format.json"
+
+
+class ProfileStateStoreError(ValueError):
+    """The committed profile-state record cannot be safely interpreted."""
 
 
 def load_profiles_from_store(store_path: str) -> list[SimProfileEntry]:
@@ -44,6 +50,7 @@ def load_profiles_from_store(store_path: str) -> list[SimProfileEntry]:
     root_path = _ensure_store_root(store_path)
     if len(root_path) == 0:
         return []
+    committed_states = _load_committed_profile_states(root_path)
     loaded: list[tuple[int, str, SimProfileEntry]] = []
     for child_name in sorted(os.listdir(root_path)):
         child_path = os.path.join(root_path, child_name)
@@ -53,8 +60,17 @@ def load_profiles_from_store(store_path: str) -> list[SimProfileEntry]:
         if loaded_entry is None:
             continue
         order_index, entry = loaded_entry
+        if committed_states is not None:
+            state = committed_states.get(entry.aid.upper())
+            if state is None:
+                continue
+            entry.state = state
         loaded.append((order_index, child_name, entry))
     loaded.sort(key=lambda item: (item[0], item[1]))
+    if committed_states is not None:
+        loaded_aids = [entry.aid.upper() for _, _, entry in loaded]
+        if len(set(loaded_aids)) != len(loaded_aids) or set(loaded_aids) != set(committed_states):
+            raise ProfileStateStoreError("committed profile state refers to missing or duplicate manifests")
     return [entry for _, _, entry in loaded]
 
 
@@ -63,6 +79,8 @@ def sync_profiles_to_store(store_path: str, profiles: list[SimProfileEntry]) -> 
     root_path = _ensure_store_root(store_path)
     if len(root_path) == 0:
         return
+    _load_committed_profile_states(root_path)
+    _ensure_profile_state_marker(root_path)
     desired_directories: set[str] = set()
     for order_index, profile in enumerate(profiles):
         directory_name = _profile_directory_name(profile)
@@ -88,13 +106,103 @@ def sync_profiles_to_store(store_path: str, profiles: list[SimProfileEntry]) -> 
         else:
             _delete_if_exists(os.path.join(directory_path, PROFILE_UPP_FILENAME))
 
-    for child_name in os.listdir(root_path):
+    # Enumerate before committing so a directory read failure cannot be
+    # mistaken for a failed operation after the new state became visible.
+    cleanup_entries = os.listdir(root_path)
+
+    # This single atomic file is the commit record for profile membership and
+    # enabled/disabled states. Per-profile manifests above contain the full
+    # profile data, but can be rewritten one at a time. Readers overlay this
+    # committed state so a failed write or process interruption cannot expose
+    # a half-applied EnableProfile transition.
+    _write_json_file(
+        os.path.join(root_path, PROFILE_STATES_FILENAME),
+        _profile_states_payload(profiles),
+    )
+
+    for child_name in cleanup_entries:
         child_path = os.path.join(root_path, child_name)
         if os.path.isdir(child_path) is False:
             continue
         if child_name in desired_directories:
             continue
         shutil.rmtree(child_path, ignore_errors=True)
+
+
+def _load_committed_profile_states(root_path: str) -> dict[str, str] | None:
+    path = os.path.join(root_path, PROFILE_STATES_FILENAME)
+    marker_path = os.path.join(root_path, PROFILE_STATES_MARKER_FILENAME)
+    marker_exists = os.path.lexists(marker_path)
+    if marker_exists:
+        marker = _read_json_file(marker_path, protect_plaintext_on_read=True)
+        if (
+            not isinstance(marker, dict)
+            or set(marker) != {"profile_state_format"}
+            or type(marker["profile_state_format"]) is not int
+            or marker["profile_state_format"] != STORE_VERSION
+        ):
+            raise ProfileStateStoreError("invalid profile-state format marker")
+    if not os.path.lexists(path):
+        if marker_exists:
+            raise ProfileStateStoreError("committed profile-state record is missing")
+        return None
+    if not os.path.isfile(path):
+        raise ProfileStateStoreError("committed profile-state record is not a file")
+    payload = _read_json_file(path, protect_plaintext_on_read=True)
+    if (
+        not isinstance(payload, dict)
+        or type(payload.get("store_version")) is not int
+        or payload.get("store_version") != STORE_VERSION
+    ):
+        raise ProfileStateStoreError("invalid or unsupported committed profile-state record")
+    raw_states = payload.get("states")
+    if not isinstance(raw_states, dict):
+        raise ProfileStateStoreError("invalid committed profile states")
+    states: dict[str, str] = {}
+    for aid, state in raw_states.items():
+        if not isinstance(aid, str) or not isinstance(state, str):
+            raise ProfileStateStoreError("invalid committed profile state entry")
+        normalized_aid = aid.strip().upper()
+        normalized_state = state.strip().lower()
+        if (
+            not normalized_aid
+            or normalized_state not in {"enabled", "disabled"}
+            or normalized_aid in states
+        ):
+            raise ProfileStateStoreError("invalid or duplicate committed profile state entry")
+        states[normalized_aid] = normalized_state
+    if sum(state == "enabled" for state in states.values()) > 1:
+        raise ProfileStateStoreError("multiple enabled profiles in committed state")
+    return states
+
+
+def ensure_profile_state_snapshot(store_path: str, profiles: list[SimProfileEntry]) -> None:
+    """Create the initial atomic profile-state commit record for legacy stores."""
+    root_path = _ensure_store_root(store_path)
+    if len(root_path) == 0:
+        return
+    path = os.path.join(root_path, PROFILE_STATES_FILENAME)
+    committed_states = _load_committed_profile_states(root_path)
+    _ensure_profile_state_marker(root_path)
+    if committed_states is not None:
+        return
+    _write_json_file(path, _profile_states_payload(profiles))
+
+
+def _ensure_profile_state_marker(root_path: str) -> None:
+    path = os.path.join(root_path, PROFILE_STATES_MARKER_FILENAME)
+    if not os.path.lexists(path):
+        _write_json_file(path, {"profile_state_format": STORE_VERSION})
+
+
+def _profile_states_payload(profiles: list[SimProfileEntry]) -> dict[str, Any]:
+    return {
+        "store_version": STORE_VERSION,
+        "states": {
+            str(profile.aid).strip().upper(): str(profile.state).strip().lower()
+            for profile in profiles
+        },
+    }
 
 
 def load_profile_image_json_file(path: str) -> SimProfileImage | None:
@@ -109,6 +217,8 @@ def profile_store_has_entries(store_path: str) -> bool:
     root_path = _ensure_store_root(store_path)
     if len(root_path) == 0:
         return False
+    if _load_committed_profile_states(root_path) is not None:
+        return True
     for child_name in os.listdir(root_path):
         child_path = os.path.join(root_path, child_name)
         if os.path.isdir(child_path) is False:
