@@ -279,7 +279,14 @@ class SgpLogic:
             self.state.active_profile_aid = previous_active_aid
             self.state.notifications[:] = previous_notifications
             self.state.next_notification_seq = previous_notification_sequence
-            rebuild_runtime_filesystem(self.state)
+            try:
+                rebuild_runtime_filesystem(self.state)
+            except Exception:
+                # The profile snapshot still records the prior commit, but
+                # the live filesystem can no longer be trusted. Keep this
+                # engine unavailable until it is reconstructed from storage.
+                self.state.profile_state_consistent = False
+                return tlv(response_tag, tlv("80", b"\x7f")), 0x90, 0x00
             # The profile-state commit record still describes the old
             # state. Best-effort rewrite the individual manifests to match;
             # a failure here cannot expose the uncommitted switch on reload.
