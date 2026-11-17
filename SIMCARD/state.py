@@ -1058,6 +1058,7 @@ class SimCardState:
     nodes: dict[str, SimFileNode] = field(default_factory=dict)
     base_nodes: dict[str, SimFileNode] = field(default_factory=dict)
     active_profile_aid: str = ""
+    profile_state_consistent: bool = True
     notifications: list[SimNotificationEntry] = field(default_factory=list)
     next_notification_seq: int = 1
     # SGP.32 §2.11.2 stored eUICC Package Results (signed). Drained by the

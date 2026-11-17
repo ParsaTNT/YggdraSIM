@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 1oT OÜ. Authored by Hampus Hellsberg.
+
 from __future__ import annotations
 
 import json
@@ -276,6 +279,49 @@ class EnableProfilePersistenceFailureTests(unittest.TestCase):
         self.assertEqual(
             [(profile.aid, profile.state) for profile in reloaded.state.profiles],
             [(SOURCE_AID, "disabled"), (TARGET_AID, "enabled")],
+        )
+
+    def test_failed_rollback_rebuild_quarantines_engine_until_restart(self) -> None:
+        original_rebuild = sgp.rebuild_runtime_filesystem
+        rebuild_calls = 0
+
+        def fail_rollback_after_forward_rebuild(state) -> None:
+            nonlocal rebuild_calls
+            rebuild_calls += 1
+            if rebuild_calls == 1:
+                original_rebuild(state)
+                return
+            if rebuild_calls == 2:
+                raise OSError("injected rollback filesystem rebuild failure")
+            original_rebuild(state)
+
+        notifications_before = list(self.engine.state.notifications)
+        with (
+            mock.patch.object(
+                sgp,
+                "rebuild_runtime_filesystem",
+                side_effect=fail_rollback_after_forward_rebuild,
+            ),
+            mock.patch.object(
+                self.engine.sgp, "_sync_profile_store", return_value=False
+            ) as sync_store,
+        ):
+            first_response = self.engine.transmit(_enable_apdu(TARGET_AID))
+            second_response = self.engine.transmit(_enable_apdu(TARGET_AID))
+
+        self.assertNotEqual(first_response, (bytes.fromhex("BF3103800100"), 0x90, 0x00))
+        self.assertEqual(second_response, (b"", 0x6F, 0x00))
+        self.assertEqual(
+            sync_store.call_count, 1, "quarantined engines must reject later mutations"
+        )
+        self.assertEqual(
+            [(profile.aid, profile.state) for profile in self.engine.state.profiles],
+            [(SOURCE_AID, "enabled"), (TARGET_AID, "disabled")],
+        )
+        self.assertEqual(self.engine.state.notifications, notifications_before)
+        self.assertEqual(
+            [(profile.aid, profile.state) for profile in self._new_engine().state.profiles],
+            [(SOURCE_AID, "enabled"), (TARGET_AID, "disabled")],
         )
 
 

@@ -354,6 +354,12 @@ class SimulatedSimCardEngine:
         command = bytes(apdu or b"")
         self.state.apdu_count += 1
 
+        if self.state.profile_state_consistent is False:
+            result = (b"", 0x6F, 0x00)
+            self._record_fault(command, RuntimeError("profile state recovery failed"))
+            self._note_abnormal_result(command, result)
+            return result
+
         for hook in self.quirks.before_apdu_hooks:
             overridden = hook(command, self.state)
             if overridden is not None:
